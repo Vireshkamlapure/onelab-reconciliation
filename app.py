@@ -6,70 +6,55 @@ import numpy as np
 # PAGE CONFIGURATION
 # ==========================================
 st.set_page_config(page_title="Reconciliation Engine", layout="wide")
+st.title("Month-End Reconciliation Engine")
+st.markdown("This tool compares internal platform transactions against bank settlement records to identify month-end discrepancies.")
 
 # ==========================================
-# 1. SYNTHETIC DATA GENERATION
+# 1. DEFINE EXPECTED SCHEMAS
 # ==========================================
-
-@st.cache_data
-def generate_test_data():
-    """
-    Generates synthetic payment platform and bank settlement data 
-    with 4 intentionally planted discrepancies.
-    """
-    # Valid baseline data
-    platform_records = [
-        {'tx_id': 'TX_001', 'date': '2024-01-05', 'amount': 150.00, 'type': 'Payment'},
-        {'tx_id': 'TX_002', 'date': '2024-01-12', 'amount': 200.00, 'type': 'Payment'},
-        {'tx_id': 'TX_003', 'date': '2024-01-18', 'amount': 50.00,  'type': 'Payment'},
-    ]
-    
-    bank_records = [
-        {'tx_id': 'TX_001', 'settlement_date': '2024-01-06', 'amount': 150.00, 'type': 'Payment'},
-        {'tx_id': 'TX_002', 'settlement_date': '2024-01-14', 'amount': 200.00, 'type': 'Payment'},
-        {'tx_id': 'TX_003', 'settlement_date': '2024-01-19', 'amount': 50.00,  'type': 'Payment'},
-    ]
-
-    # --- BUG 1: Timing Gap (Jan 31 transaction settling in Feb) ---
-    platform_records.append({'tx_id': 'TX_TIMING', 'date': '2024-01-31', 'amount': 500.00, 'type': 'Payment'})
-    bank_records.append({'tx_id': 'TX_TIMING', 'settlement_date': '2024-02-02', 'amount': 500.00, 'type': 'Payment'})
-
-    # --- BUG 2: Rounding Difference (Platform stores float precision, bank strictly 2 decimals) ---
-    for i in range(4, 7):
-        tx_id = f'TX_RND_00{i}'
-        platform_records.append({'tx_id': tx_id, 'date': '2024-01-20', 'amount': 33.334, 'type': 'Payment'})
-        bank_records.append({'tx_id': tx_id, 'settlement_date': '2024-01-21', 'amount': 33.33, 'type': 'Payment'})
-
-    # --- BUG 3: Duplicate Entry (Platform retried and logged twice, bank only processed once) ---
-    dup_record = {'tx_id': 'TX_DUP', 'date': '2024-01-25', 'amount': 75.00, 'type': 'Payment'}
-    platform_records.append(dup_record)
-    platform_records.append(dup_record) # The Duplicate
-    bank_records.append({'tx_id': 'TX_DUP', 'settlement_date': '2024-01-26', 'amount': 75.00, 'type': 'Payment'})
-
-    # --- BUG 4: Missing Refund (Bank processed a chargeback/refund not reflected in Platform) ---
-    bank_records.append({'tx_id': 'TX_REFUND_99', 'settlement_date': '2024-01-28', 'amount': -45.00, 'type': 'Refund'})
-
-    # Create DataFrames
-    df_plat = pd.DataFrame(platform_records)
-    df_bank = pd.DataFrame(bank_records)
-    
-    # Convert dates
-    df_plat['date'] = pd.to_datetime(df_plat['date'])
-    df_bank['settlement_date'] = pd.to_datetime(df_bank['settlement_date'])
-    
-    return df_plat, df_bank
-
+REQUIRED_PLATFORM_COLS = {'tx_id', 'date', 'amount', 'type'}
+REQUIRED_BANK_COLS = {'tx_id', 'settlement_date', 'amount', 'type'}
 
 # ==========================================
-# 2. RECONCILIATION ENGINE UI
+# 2. HELPER: VALIDATE AND LOAD
 # ==========================================
+def load_and_validate_csv(uploaded_file, required_cols, source_name):
+    """Reads a Streamlit uploaded file into Pandas and validates its schema."""
+    try:
+        # Read the BytesIO object directly into Pandas
+        df = pd.read_csv(uploaded_file)
+        
+        # Check for missing columns
+        missing_cols = required_cols - set(df.columns)
+        if missing_cols:
+            st.error(f"**Schema Error in {source_name} Data:** Missing required columns: `{', '.join(missing_cols)}`")
+            return None
+            
+        return df
+        
+    except pd.errors.EmptyDataError:
+        st.error(f"**Error:** The uploaded {source_name} file is empty.")
+        return None
+    except pd.errors.ParserError:
+        st.error(f"**Error:** The {source_name} file is corrupted or not a valid CSV.")
+        return None
+    except Exception as e:
+        st.error(f"**Unexpected Error reading {source_name} file:** {e}")
+        return None
 
+# ==========================================
+# 3. RECONCILIATION ENGINE UI
+# ==========================================
 def render_reconciliation_report(df_plat, df_bank):
     """
     Compares Platform and Bank datasets for January to find discrepancies 
     and renders them using Streamlit components.
     """
     st.header("Discrepancy Report")
+    
+    # Ensure dates are datetime objects before filtering (Crucial for user uploads)
+    df_plat['date'] = pd.to_datetime(df_plat['date'])
+    df_bank['settlement_date'] = pd.to_datetime(df_bank['settlement_date'])
     
     # Isolate January Platform Data
     jan_plat = df_plat[(df_plat['date'] >= '2024-01-01') & (df_plat['date'] <= '2024-01-31')].copy()
@@ -83,7 +68,7 @@ def render_reconciliation_report(df_plat, df_bank):
     
     if not np.isclose(plat_total, bank_total, atol=0.001):
         st.warning(
-            f"**[FLAG 2 Caught] Macro Discrepancy:** \n\n"
+            f"**Macro Discrepancy:** \n\n"
             f"Platform Total (`${plat_total:.3f}`) does not match Bank Total (`${bank_total:.2f}`). \n\n"
             f"*Investigation required: Likely fractional float accumulation.*",
             icon="⚠️"
@@ -93,7 +78,7 @@ def render_reconciliation_report(df_plat, df_bank):
     plat_dups = jan_plat[jan_plat.duplicated('tx_id', keep=False)]
     
     if not plat_dups.empty:
-        st.error("**[FLAG 3 Caught] Duplicate found in Platform Data:**", icon="🚨")
+        st.error("**Duplicate found in Platform Data:**", icon="🚨")
         st.dataframe(plat_dups[['tx_id', 'date', 'amount', 'type']], use_container_width=True, hide_index=True)
         # Drop duplicates for the rest of the 1:1 reconciliation
         jan_plat = jan_plat.drop_duplicates('tx_id')
@@ -115,42 +100,51 @@ def render_reconciliation_report(df_plat, df_bank):
         (recon['settlement_date'].dt.month == 2)
     ]
     if not timing_gaps.empty:
-        st.info("**[FLAG 1 Caught] Timing Gap (Jan Platform -> Feb Bank Settlement):**", icon="⏱️")
+        st.info("**Timing Gap (Jan Platform -> Feb Bank Settlement):**", icon="⏱️")
         st.dataframe(timing_gaps[['tx_id', 'date', 'settlement_date', 'amount_plat']], use_container_width=True, hide_index=True)
 
     # --- CATCH BUG 4: Missing Refund ---
     missing_in_plat = recon[recon['_merge'] == 'right_only']
     ghost_refunds = missing_in_plat[missing_in_plat['type_bank'] == 'Refund']
     if not ghost_refunds.empty:
-        st.error("**[FLAG 4 Caught] Bank Refund missing from Platform:**", icon="🚨")
+        st.error("**Bank Refund missing from Platform:**", icon="🚨")
         st.dataframe(ghost_refunds[['tx_id', 'settlement_date', 'amount_bank', 'type_bank']], use_container_width=True, hide_index=True)
         
     st.success("Reconciliation scan complete.", icon="✅")
 
-
 # ==========================================
-# 3. MAIN APP LAYOUT
+# 4. MAIN APP LAYOUT & UPLOAD UI
 # ==========================================
+st.markdown("### 📥 Upload Reconciliation Data")
 
-st.title("Month-End Reconciliation Engine")
-st.markdown("This tool compares internal platform transactions against bank settlement records to identify month-end discrepancies.")
+col1, col2 = st.columns(2)
 
-# Generate Data
-platform_data, bank_data = generate_test_data()
+with col1:
+    platform_file = st.file_uploader("Upload Platform Data (CSV)", type=['csv'], key="plat_upload")
 
-# Data Peek Expanders
-with st.expander("🔍 View Raw Platform Data (Pre-Reconciliation)", expanded=False):
-    st.dataframe(platform_data, use_container_width=True, hide_index=True)
+with col2:
+    bank_file = st.file_uploader("Upload Bank Settlement Data (CSV)", type=['csv'], key="bank_upload")
 
-with st.expander("🏦 View Raw Bank Data (Pre-Reconciliation)", expanded=False):
-    st.dataframe(bank_data, use_container_width=True, hide_index=True)
-
-st.divider()
-
-# Run Reconciliation UI
-render_reconciliation_report(platform_data, bank_data)
-
-# Hidden assertions to mathematically prove the states (runs silently in the background)
-assert len(platform_data[platform_data.duplicated('tx_id')]) == 1, "Should be exactly 1 duplicate row"
-assert 'TX_REFUND_99' not in platform_data['tx_id'].values, "Refund should not exist in platform"
-assert platform_data['amount'].sum() != bank_data['amount'].sum(), "Totals should not match due to float rounding"
+if platform_file and bank_file:
+    
+    df_plat = load_and_validate_csv(platform_file, REQUIRED_PLATFORM_COLS, "Platform")
+    df_bank = load_and_validate_csv(bank_file, REQUIRED_BANK_COLS, "Bank")
+    
+    if df_plat is not None and df_bank is not None:
+        
+        st.success("✅ Files validated successfully. Ready for reconciliation.")
+        
+        with st.expander("🔍 Preview Uploaded Data", expanded=False):
+            st.markdown("**Platform Data Head**")
+            st.dataframe(df_plat.head(3), use_container_width=True)
+            st.markdown("**Bank Data Head**")
+            st.dataframe(df_bank.head(3), use_container_width=True)
+            
+        st.divider()
+        
+        if st.button("🚀 Run Reconciliation Engine", type="primary"):
+            with st.spinner("Crunching the numbers..."):
+                render_reconciliation_report(df_plat, df_bank)
+                
+elif platform_file or bank_file:
+    st.info("ℹ️ Please upload both the Platform and Bank files to proceed.")

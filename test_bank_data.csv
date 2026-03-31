@@ -1,0 +1,10 @@
+tx_id,settlement_date,amount,type
+TX_001,2024-01-06,150.0,Payment
+TX_002,2024-01-14,200.0,Payment
+TX_003,2024-01-19,50.0,Payment
+TX_TIMING,2024-02-02,500.0,Payment
+TX_RND_004,2024-01-21,33.33,Payment
+TX_RND_005,2024-01-21,33.33,Payment
+TX_RND_006,2024-01-21,33.33,Payment
+TX_DUP,2024-01-26,75.0,Payment
+TX_REFUND_99,2024-01-28,-45.0,Refund
